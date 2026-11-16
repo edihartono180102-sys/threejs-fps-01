@@ -3,6 +3,11 @@
 // A-long along the west wall, Mid through the crate yard, B-short along the east wall.
 // The attackers spawn south, the defenders north. Plain geometry only, no models,
 // no textures, nothing fetched over the network.
+//
+// Dressing (pipes, beams, drums) is visual only: it never collides and never stops a
+// bullet, so it cannot change a lane. `cover` names the spots bots fall back to when
+// they reposition after a burst — each one sits behind a real box, on a route-free
+// patch of floor, so a bot walking to it never wedges on a corner.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 
@@ -60,6 +65,18 @@ export function createWorld(scene) {
     return mesh;
   }
 
+  // Dressing only: no collider, no shootable. Pipes run along the walls above head
+  // height and a gantry beam crosses Mid at 4 m, so they read as a yard without
+  // ever blocking a walk or a shot.
+  function dressing(width, height, depth, x, y, z, material) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), materials[material] || darkMetal);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+    return mesh;
+  }
+
   // Floor and perimeter, 5 m walls, open to the dusk sky.
   box(32.4, 0.4, 26.4, 0, -0.2, 0, 'ground');
   box(0.4, 5, 26.4, -16.2, 2.5, 0, 'wall');
@@ -73,6 +90,9 @@ export function createWorld(scene) {
   box(1.2, 1.1, 1.2, -9.4, 0.55, -7.4, 'crate');
   box(2.2, 1.1, 1.2, -11.6, 0.55, -5.2, 'crate');
   cylinder(0.9, 4.4, -14.2, -5.6, 'rust');
+  // A second barrel pair at Furnace, clear of the A-long lane and the hold points.
+  cylinder(0.7, 1.1, -14.6, 1.8, 'teal');
+  cylinder(0.7, 1.1, -14.6, 3.0, 'rust');
   // Site B "Depot", east-north: a teal container, a stack and barrels.
   box(4.4, 2.6, 2.2, 13.2, 1.3, -9.6, 'teal');
   box(1.2, 1.1, 1.2, 9.4, 0.55, -10.6, 'crate');
@@ -80,6 +100,9 @@ export function createWorld(scene) {
   box(2.2, 1.1, 1.2, 11.6, 0.55, -5.2, 'crate');
   cylinder(0.7, 1.1, 14.4, -5.4, 'rust');
   cylinder(0.7, 1.1, 14.4, -4.2, 'teal');
+  // The same barrel pair at Depot, mirrored.
+  cylinder(0.7, 1.1, 14.6, 1.8, 'rust');
+  cylinder(0.7, 1.1, 14.6, 3.0, 'teal');
 
   // Mid: a crate corridor and a low platform to jump onto, plus a pillar pair.
   box(1.2, 1.1, 3.4, -2.2, 0.55, 2.0, 'crate');
@@ -101,6 +124,15 @@ export function createWorld(scene) {
   box(1.2, 1.1, 1.2, 0, 0.55, 5.6, 'crate');
   cylinder(0.7, 1.1, -8.0, 9.6, 'teal');
   cylinder(0.7, 1.1, 8.0, 9.6, 'rust');
+  // A low wall between the sites, north of Mid: defenders rotating between
+  // Furnace and Depot can cross behind it without standing in the open. It sits
+  // clear of the toMid route (x = 0) and both holdMid points.
+  box(3.0, 1.0, 0.8, 0, 0.5, -10.4, 'wall');
+
+  // Dressing: wall pipes and the Mid gantry, high enough to never matter.
+  dressing(0.3, 0.3, 26.4, -15.8, 4.4, 0, 'rust');
+  dressing(0.3, 0.3, 26.4, 15.8, 4.4, 0, 'teal');
+  dressing(32.4, 0.3, 0.3, 0, 4.2, -1.4, 'wall');
 
   // Bombsite markers: a flat glowing ring on the floor, no collider.
   function siteRing(x, z) {
@@ -154,6 +186,15 @@ export function createWorld(scene) {
       new THREE.Vector3(-1, 0, -11.5),
       new THREE.Vector3(3, 0, -11),
       new THREE.Vector3(8, 0, -11),
+    ],
+    // Cover spots a bot can fall back to after a burst: behind the A-long/B-short
+    // low walls and the attacker-side crates, all on open floor.
+    cover: [
+      new THREE.Vector3(-10.6, 0, 0.2),
+      new THREE.Vector3(10.6, 0, 0.2),
+      new THREE.Vector3(-4.6, 0, 9.6),
+      new THREE.Vector3(4.6, 0, 9.6),
+      new THREE.Vector3(0, 0, 7.0),
     ],
     // Waypoints: lanes the bots walk. Each list is a route from south to a site.
     routes: {

@@ -1,9 +1,18 @@
-// Boot and the one loop: a fixed 60 Hz simulation feeding a render at the display's
-// rate. Two deterministic modes share the same code as live play:
-//   ?shot=start|play|bomb|end&seed=N — scripts a frame, renders it twice, freezes it
-//     and sets window.__shotReady, for the screenshots.
-//   ?selftest=1 — plays 30 scripted seconds (move, shoot, plant) and writes the
-//     results as JSON into #selftest, for headless checks.
+// Boot and the one loop: a fixed 60 Hz simulation feeding a render at the
+// display's rate. Two deterministic modes share the same code as live play:
+//   ?shot=start|play|bomb|end&seed=N — scripts a frame, renders it twice,
+//     freezes it and sets window.__shotReady, for the screenshots.
+//   ?selftest=1 — plays 30 scripted seconds (move, shoot, plant) and writes
+//     the results as JSON into #selftest, for headless checks.
+// The loop also watches tab visibility: hiding the tab mid-round pauses the
+// match, so a player who alt-tabs does not come back to a lost round. The
+// selftest reports how fast its own steps ran (steps per second), so a slow
+// machine shows up in the result instead of silently passing on fewer
+// simulated seconds.
+//
+// Both scripted modes are tables, not branches: SHOT_SETUPS maps a shot name
+// to the scene it stages, and SELFTEST_PHASES lists the selftest's phases in
+// order. A new capture or a new check is one more table entry.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { mulberry32 } from './rng.js';
@@ -32,12 +41,17 @@ function recordError(message) {
 window.addEventListener('error', (event) => recordError(event.message || 'error'));
 window.addEventListener('unhandledrejection', (event) => recordError(`rejected: ${event.reason}`));
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-document.getElementById('game').appendChild(renderer.domElement);
+function buildRenderer() {
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.getElementById('game').appendChild(renderer.domElement);
+  return renderer;
+}
+
+const renderer = buildRenderer();
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(PALETTE.canvas);
@@ -49,6 +63,10 @@ const world = createWorld(scene);
 const audio = createAudio();
 const hud = createHud({
   onBuy: (id) => game.buy(id),
+  onMute: () => {
+    const muted = audio.toggleMute();
+    hud.toast(muted ? 'Sound off (M to unmute)' : 'Sound on');
+  },
 });
 const input = createInput(renderer.domElement, onLockChange);
 const game = createSim({ scene, camera, world, hud, audio, input, rng: random, shotMode: Boolean(shot) });
@@ -59,6 +77,7 @@ let started = false;
 let frozen = false;
 let accumulator = 0;
 let lastTime = performance.now();
+let settledSteps = 0; // fixed steps run by settle(): the selftest's own clock
 
 hud.onPlay(() => {
   if (shot) return;
@@ -74,6 +93,13 @@ hud.onPlay(() => {
   }
 });
 
+// Pausing is one action, used by the lock change and the visibility change
+// alike: freeze the sim and tell the player how to resume.
+function pauseMatch() {
+  sim.paused = true;
+  hud.showOverlay('EMBER YARD', 'Paused. Click to resume.', 'Click to resume');
+}
+
 function onLockChange(locked) {
   if (shot) return;
   audio.unlock();
@@ -83,10 +109,18 @@ function onLockChange(locked) {
     hud.hideOverlay();
     hud.hideBuy();
   } else if (sim.phase === 'live') {
-    sim.paused = true;
-    hud.showOverlay('EMBER YARD', 'Paused. Click to resume.', 'Click to resume');
+    pauseMatch();
   }
 }
+
+// Hiding the tab mid-round pauses the match: without this, the fixed-step loop
+// keeps running on the background tab's throttled clock and the round is lost
+// to a timer the player never saw. Captures and selftests never hide the tab,
+// so they are exempt.
+document.addEventListener('visibilitychange', () => {
+  if (shot || selftest) return;
+  if (document.hidden && sim.phase === 'live') pauseMatch();
+});
 
 function syncCamera() {
   const body = sim.player.alive ? playerBody : sim.spectate ? sim.spectate.mover.body : playerBody;
@@ -109,10 +143,13 @@ function aimAt(point) {
   syncCamera();
 }
 
+// Advance the simulation by a fixed number of steps, on the selftest's clock.
 function settle(steps) {
+  settledSteps += steps;
   for (let i = 0; i < steps; i += 1) game.step(FIXED_STEP);
 }
 
+// Aim at a point and hold the trigger for a short burst, then release.
 function fireAt(point) {
   aimAt(point);
   input.state.firing = true;
@@ -142,6 +179,76 @@ function botChest(bot) {
   return new THREE.Vector3(p.x, p.y + 1.15, p.z);
 }
 
+// Put a bot at a spot, facing a yaw. Captures stage bodies, not rounds.
+function stageBot(bot, x, z, yaw) {
+  bot.mover.body.position.set(x, 0, z);
+  bot.mover.body.yaw = yaw;
+}
+
+// -- Screenshot captures --------------------------------------------------------
+// Each setup stages one frame: the player, the bots, and a few settled steps.
+
+function setupStart() {
+  playerBody.position.set(0, 0, 11.5);
+  playerBody.yaw = 0;
+  playerBody.pitch = 0;
+  settle(20);
+  syncCamera();
+  hud.showOverlay(
+    'EMBER YARD',
+    'Tactical FPS: two teams, five rounds, one bomb. Plant it at Furnace or Depot — or drop every defender. Click to play.',
+    'Click to play',
+  );
+}
+
+function setupPlay(ash, ember) {
+  // Mid-round firefight on A-long: the player has just dropped one defender
+  // and is lining up the next, with a teammate pushing Mid behind.
+  playerBody.position.set(-11.5, 0, 4);
+  playerBody.yaw = 0;
+  playerBody.pitch = 0;
+  stageBot(ash[0], -12.2, -3.5, Math.PI);
+  stageBot(ash[1], -9.5, -6.5, 2.9);
+  stageBot(ember[0], -1.5, 0, 0);
+  settle(30);
+  // Drop the first defender for real, then line up the second with a live
+  // muzzle flash.
+  fireAt(botChest(ash[0]));
+  fireAt(botChest(ash[0]));
+  fireAt(botChest(ash[0]));
+  settle(6);
+  aimAt(botChest(ash[1]));
+  input.state.firing = true;
+  settle(8);
+  input.state.firing = false;
+}
+
+function setupBomb(ash, ember) {
+  // The bomb is planted at Furnace with 12 seconds on the fuse; a defender is
+  // closing in to defuse while the player covers the site.
+  game.debug.plantAtSite('A');
+  sim.bomb.fuse = 12;
+  playerBody.position.set(-6.5, 0, -4.5);
+  playerBody.yaw = 0;
+  playerBody.pitch = 0;
+  stageBot(ash[2], -9.8, -6.2, -2.0);
+  stageBot(ember[1], -13.5, -4, 0.8);
+  settle(24);
+  aimAt(botChest(ash[2]));
+}
+
+function setupEnd() {
+  // Round won: every defender is down, the scoreboard reads 1–0.
+  game.debug.killAllAsh();
+  settle(10);
+  playerBody.position.set(-8, 0, -2);
+  playerBody.yaw = 0.4;
+  playerBody.pitch = 0;
+  settle(10);
+}
+
+const SHOT_SETUPS = { start: setupStart, play: setupPlay, bomb: setupBomb, end: setupEnd };
+
 function runShot(name) {
   hud.hideOverlay();
   hud.hideBuy();
@@ -155,123 +262,129 @@ function runShot(name) {
   game.weaponView.equip(WEAPONS.rifle);
   const ash = game.sim.bots.filter((b) => b.team === 'ash');
   const ember = game.sim.bots.filter((b) => b.team === 'ember');
-
-  if (name === 'start') {
-    playerBody.position.set(0, 0, 11.5);
-    playerBody.yaw = 0;
-    playerBody.pitch = 0;
-    settle(20);
-    syncCamera();
-    hud.showOverlay(
-      'EMBER YARD',
-      'Tactical FPS: two teams, five rounds, one bomb. Plant it at Furnace or Depot — or drop every defender. Click to play.',
-      'Click to play',
-    );
-  } else if (name === 'play') {
-    // Mid-round firefight on A-long: the player has just dropped one defender and is
-    // lining up the next, with a teammate pushing Mid behind.
-    playerBody.position.set(-11.5, 0, 4);
-    playerBody.yaw = 0;
-    playerBody.pitch = 0;
-    ash[0].mover.body.position.set(-12.2, 0, -3.5);
-    ash[0].mover.body.yaw = Math.PI;
-    ash[1].mover.body.position.set(-9.5, 0, -6.5);
-    ash[1].mover.body.yaw = 2.9;
-    ember[0].mover.body.position.set(-1.5, 0, 0);
-    ember[0].mover.body.yaw = 0;
-    settle(30);
-    // Drop the first defender for real, then line up the second with a live muzzle flash.
-    fireAt(botChest(ash[0]));
-    fireAt(botChest(ash[0]));
-    fireAt(botChest(ash[0]));
-    settle(6);
-    aimAt(botChest(ash[1]));
-    input.state.firing = true;
-    settle(8);
-    input.state.firing = false;
-  } else if (name === 'bomb') {
-    // The bomb is planted at Furnace with 12 seconds on the fuse; a defender is
-    // closing in to defuse while the player covers the site.
-    game.debug.plantAtSite('A');
-    sim.bomb.fuse = 12;
-    playerBody.position.set(-6.5, 0, -4.5);
-    playerBody.yaw = 0;
-    playerBody.pitch = 0;
-    ash[2].mover.body.position.set(-9.8, 0, -6.2);
-    ash[2].mover.body.yaw = -2.0;
-    ember[1].mover.body.position.set(-13.5, 0, -4);
-    ember[1].mover.body.yaw = 0.8;
-    settle(24);
-    aimAt(botChest(ash[2]));
-  } else {
-    // Round won: every defender is down, the scoreboard reads 1–0.
-    game.debug.killAllAsh();
-    settle(10);
-    playerBody.position.set(-8, 0, -2);
-    playerBody.yaw = 0.4;
-    playerBody.pitch = 0;
-    settle(10);
-  }
+  const setup = SHOT_SETUPS[name] || setupEnd;
+  setup(ash, ember);
   hud.setHealth(sim.player.health, sim.player.armor);
   hud.setAmmo(game.weaponView.state.mag, game.weaponView.state.reserve, game.weaponView.state.def.name);
   paintTwiceThenReady();
 }
 
+// -- Selftest -------------------------------------------------------------------
+// One phase per entry, run in order; each records what it proved into the
+// result. The phases share the firing range and the far corner, so the
+// shooting check and the plant check do not fight each other.
+
+const FIRING_LINE = [
+  [-12.2, -3.5], [-9.5, -6.5], [-10.5, -9], [-7.5, -8.5],
+];
+const FAR_CORNER = [14, 11];
+
+function moveDefendersTo(spots, yaw) {
+  for (const bot of game.sim.bots.filter((b) => b.team === 'ash')) {
+    bot.mover.body.position.set(spots[0], 0, spots[1]);
+    bot.mover.body.yaw = yaw;
+  }
+}
+
+function selftestWalk() {
+  // Walk forward for 2 seconds: movement, collision, and the buy-to-live
+  // transition all run before any shooting.
+  input.state.keys.add('KeyW');
+  settle(120);
+  input.state.keys.delete('KeyW');
+}
+
+function selftestShooting(result) {
+  // Firing range on A-long: the player and the defenders face each other down
+  // a clear lane, so the shooting check tests aim and damage — not whether a
+  // strafing bot happened to drift behind the mid pillar's sightline, which
+  // the old mid-map setup let happen and made the check a coin flip.
+  const ash = game.sim.bots.filter((b) => b.team === 'ash');
+  playerBody.position.set(-11.5, 0, 4);
+  playerBody.yaw = 0;
+  playerBody.pitch = 0;
+  ash.forEach((bot, i) => {
+    bot.mover.body.position.set(FIRING_LINE[i][0], 0, FIRING_LINE[i][1]);
+    bot.mover.body.yaw = Math.PI;
+  });
+  settle(10);
+  // Shoot the nearest defenders until two drop, or the player drops first.
+  const killsAtStart = sim.stats.kills;
+  for (const bot of ash) {
+    let guard = 0;
+    while (bot.alive && guard < 40 && sim.player.alive) {
+      fireAt(botChest(bot));
+      guard += 1;
+    }
+    if (sim.stats.kills - killsAtStart >= 2) break;
+    if (!sim.player.alive) break;
+  }
+  result.shots = sim.stats.shots;
+  result.hits = sim.stats.hits;
+  result.kills = sim.stats.kills;
+  result.headshots = sim.stats.headshots;
+  result.damage = Math.round(sim.stats.damage);
+}
+
+function selftestPlant(result) {
+  // Walk to site A and plant the bomb for real. The defenders are sent to the
+  // far corner first: they stood on the firing line a few metres from the
+  // site, and would otherwise gun the planter down mid-channel — the plant
+  // check is about the channel, not about surviving a firing squad.
+  moveDefendersTo(FAR_CORNER, Math.PI);
+  playerBody.position.set(-11, 0, -6);
+  input.state.keys.add('KeyE');
+  settle(200);
+  input.state.keys.delete('KeyE');
+  result.bombStatus = sim.bomb.status;
+}
+
+function selftestBotCarry(result) {
+  // Bot carry: a fresh round, the player dies mid-map and drops the bomb, an
+  // Ember bot picks it up and plants it for real. This is the path the
+  // revision fixed: a bot plant used to only play a sound, and no bot ever
+  // picked a dropped bomb up.
+  game.startRound();
+  sim.phase = 'live';
+  sim.timer = 90;
+  hud.hideBuy();
+  playerBody.position.set(-6, 0, 2);
+  // Defenders hold the far south-east corner, backs turned, so the carry is
+  // a mechanics check and not a 1v4 the carrier usually loses. The carrier
+  // walks west to Furnace, away from them.
+  moveDefendersTo(FAR_CORNER, Math.PI);
+  const ember1 = game.sim.bots.find((b) => b.id === 'ember-1');
+  ember1.mover.body.position.set(-5.5, 0, 2.5);
+  game.debug.killPlayer();
+  settle(30);
+  result.botPickup = ember1.carriesBomb === true;
+  result.bombStatusAfterDrop = sim.bomb.status;
+  // Walk to a site (~4 s) plus the 3 s plant channel, with room for a duel.
+  settle(900);
+  result.botPlantStatus = sim.bomb.status;
+  result.botPlantSite = sim.bomb.site ? sim.bomb.site.name : null;
+  result.fuse = Math.round(sim.bomb.fuse * 10) / 10;
+}
+
+const SELFTEST_PHASES = [
+  { name: 'walk', run: () => selftestWalk() },
+  { name: 'shooting', run: (result) => selftestShooting(result) },
+  { name: 'plant', run: (result) => selftestPlant(result) },
+  { name: 'bot-carry', run: (result) => selftestBotCarry(result) },
+];
+
 function runSelftest() {
+  const startedAt = performance.now();
   const result = { ok: true, shots: 0, hits: 0, kills: 0, errors, phases: [] };
   try {
     game.startMatch();
     sim.phase = 'live';
     sim.timer = 90;
     hud.hideBuy();
-    // Walk forward for 2 seconds.
-    input.state.keys.add('KeyW');
-    settle(120);
-    input.state.keys.delete('KeyW');
-    // Shoot the nearest defenders until two drop, or the player drops first.
-    const ash = game.sim.bots.filter((b) => b.team === 'ash');
-    const killsAtStart = sim.stats.kills;
-    for (const bot of ash) {
-      let guard = 0;
-      while (bot.alive && guard < 40 && sim.player.alive) {
-        fireAt(botChest(bot));
-        guard += 1;
-      }
-      if (sim.stats.kills - killsAtStart >= 2) break;
-      if (!sim.player.alive) break;
+    for (const phase of SELFTEST_PHASES) {
+      phase.run(result);
+      result.phases.push(phase.name);
     }
-    // Walk to site A and plant the bomb for real.
-    playerBody.position.set(-11, 0, -6);
-    input.state.keys.add('KeyE');
-    settle(200);
-    input.state.keys.delete('KeyE');
-    result.bombStatus = sim.bomb.status;
-    // Bot carry: a fresh round, the player dies mid-map and drops the bomb, an
-    // Ember bot picks it up and plants it for real. This is the path the
-    // revision fixed: a bot plant used to only play a sound, and no bot ever
-    // picked a dropped bomb up.
-    game.startRound();
-    sim.phase = 'live';
-    sim.timer = 90;
-    hud.hideBuy();
-    playerBody.position.set(-6, 0, 2);
-    // Defenders hold the far south-east corner, backs turned, so the carry is
-    // a mechanics check and not a 1v4 the carrier usually loses. The carrier
-    // walks west to Furnace, away from them.
-    for (const bot of game.sim.bots.filter((b) => b.team === 'ash')) {
-      bot.mover.body.position.set(14, 0, 11);
-      bot.mover.body.yaw = Math.PI;
-    }
-    const ember1 = game.sim.bots.find((b) => b.id === 'ember-1');
-    ember1.mover.body.position.set(-5.5, 0, 2.5);
-    game.debug.killPlayer();
-    settle(30);
-    result.botPickup = ember1.carriesBomb === true;
-    result.bombStatusAfterDrop = sim.bomb.status;
-    // Walk to a site (~4 s) plus the 3 s plant channel, with room for a duel.
-    settle(900);
-    result.botPlantStatus = sim.bomb.status;
-    result.botPlantSite = sim.bomb.site ? sim.bomb.site.name : null;
     result.phase = sim.phase;
     result.round = sim.round;
     result.wins = { ...sim.wins };
@@ -279,17 +392,19 @@ function runSelftest() {
     result.playerHealth = Math.round(sim.player.health);
     result.botsAlive = game.sim.bots.filter((b) => b.alive).length;
     result.botsTotal = game.sim.bots.length;
-    result.shots = sim.stats.shots;
-    result.hits = sim.stats.hits;
-    result.kills = sim.stats.kills;
-    result.headshots = sim.stats.headshots;
-    result.damage = Math.round(sim.stats.damage);
     result.errors = errors;
     result.ok = errors.length === 0;
   } catch (error) {
     result.ok = false;
     result.errors = errors.concat([String(error && error.message ? error.message : error)]);
   }
+  // How fast the scripted steps ran: a selftest that took 30 simulated seconds
+  // in 3 wall seconds ran at 600 steps/s; one that took 30 wall seconds is a
+  // machine the game would stutter on, and the number says so.
+  const wallMs = Math.max(1, Math.round(performance.now() - startedAt));
+  result.wallMs = wallMs;
+  result.steps = settledSteps;
+  result.stepsPerSecond = Math.round((settledSteps / wallMs) * 1000);
   const node = document.getElementById('selftest');
   if (node) node.textContent = JSON.stringify(result);
   document.title = 'SELFTEST_DONE';

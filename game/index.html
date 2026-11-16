@@ -6,7 +6,8 @@
 <title>Ember Yard: a three.js tactical FPS</title>
 <style>
   /* Look plan: dusk yard, dark panels, one orange accent. Every colour below is one
-     of the palette names in src/palette.js. */
+     of the palette names in src/palette.js. The bomb banner carries a fuse bar
+     (#bomb-progress) and the topbar a round-history strip (#round-history). */
   :root {
     --canvas: #191d29;
     --surface: #20242e;
@@ -58,6 +59,9 @@
   #timer-value { font-size: 22px; color: var(--ink); }
   #timer-value.low { color: var(--danger); }
   #round-value b { color: var(--ink); font-weight: 500; }
+  /* Round history: one dot per finished round. Orange dots are Ember wins; the
+     strip is plain text, so the HUD writes it with one textContent. */
+  #round-history { font-size: 12px; letter-spacing: 2px; color: var(--accent); }
 
   #teams { position: fixed; top: 16px; left: 24px; font-family: var(--font-readout); font-size: 13px; line-height: 1.7; color: var(--muted); }
   #ember-pips { color: var(--accent); letter-spacing: 2px; }
@@ -72,10 +76,26 @@
   #bomb-banner {
     position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
     font-family: var(--font-readout); font-size: 14px; letter-spacing: .04em;
-    color: var(--canvas); background: var(--accent); padding: 6px 14px;
-    border-radius: var(--radius-panel);
+    color: var(--canvas); background: var(--accent); padding: 6px 14px 9px;
+    border-radius: var(--radius-panel); overflow: hidden;
   }
   #bomb-banner[hidden] { display: none; }
+  /* Fuse bar: fills as the plant channel or the fuse runs. The HUD sets its width;
+     it is a child of the banner so it moves with it, and the banner text lives in
+     #bomb-text so writing the text never wipes the bar. */
+  #bomb-progress {
+    position: absolute; left: 0; bottom: 0; height: 3px; width: 0%;
+    background: var(--canvas); opacity: .55;
+  }
+
+  #toast {
+    position: fixed; top: 108px; left: 50%; transform: translateX(-50%);
+    font-family: var(--font-readout); font-size: 13px; color: var(--muted);
+    background: color-mix(in srgb, var(--canvas) 72%, transparent);
+    padding: 6px 12px; border: 1px solid var(--hairline); border-radius: var(--radius-panel);
+    opacity: 0; transition: opacity 200ms linear; pointer-events: none;
+  }
+  #toast.on { opacity: 1; }
 
   #killfeed {
     position: fixed; top: 96px; right: 24px; text-align: right;
@@ -95,8 +115,19 @@
   #ammo-row { display: flex; align-items: baseline; gap: 8px; justify-content: flex-end; font-family: var(--font-readout); }
   #ammo-mag { font-size: 56px; line-height: 1; letter-spacing: -0.03em; }
   #ammo.empty #ammo-mag { color: var(--accent); }
+  #ammo.low #ammo-mag { color: var(--danger); }
   #ammo-reserve { font-size: 16px; color: var(--muted); }
   #weapon-name { font-size: 13px; color: var(--muted); margin-top: 4px; font-family: var(--font-readout); }
+
+  /* Mute button: bottom-centre, clickable (pointer-events on, unlike the HUD). */
+  #mute-btn {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    font: inherit; font-size: 13px; font-family: var(--font-readout);
+    color: var(--muted); background: color-mix(in srgb, var(--canvas) 72%, transparent);
+    border: 1px solid var(--hairline); border-radius: var(--radius-panel);
+    padding: 6px 12px; cursor: pointer; pointer-events: auto;
+  }
+  #mute-btn:hover { color: var(--ink); border-color: var(--ink); }
 
   #damage-vignette {
     position: fixed; inset: 0; pointer-events: none; opacity: 0;
@@ -160,7 +191,7 @@
   #fatal, #selftest { display: none; }
 
   @media (prefers-reduced-motion: reduce) {
-    #hitmarker, #play, #damage-vignette { transition-duration: 0.01ms; }
+    #hitmarker, #play, #damage-vignette, #toast { transition-duration: 0.01ms; }
   }
 </style>
 </head>
@@ -170,13 +201,14 @@
 <div id="hud" aria-hidden="true">
   <div id="crosshair"><i></i><i></i><i></i><i></i></div>
   <div id="hitmarker"><i></i><i></i><i></i><i></i></div>
-  <div id="topbar"><span id="timer-value">1:40</span><span id="round-value">ROUND 1 · EMBER 0 — 0 ASH</span></div>
+  <div id="topbar"><span id="timer-value">1:40</span><span id="round-value">ROUND 1 · EMBER 0 — 0 ASH</span><span id="round-history"></span></div>
   <div id="teams">
     <div>EMBER <span id="ember-pips">●●●</span></div>
     <div>ASH&nbsp;&nbsp; <span id="ash-pips">●●●●</span></div>
   </div>
   <div id="money">MONEY<br><span id="money-value">$800</span></div>
-  <div id="bomb-banner" hidden></div>
+  <div id="bomb-banner" hidden><span id="bomb-text"></span><div id="bomb-progress"></div></div>
+  <div id="toast"></div>
   <div id="killfeed"></div>
   <div id="health-box">
     <div id="health-row"><span id="health-value">100</span><span id="armor-value"></span></div>
@@ -188,6 +220,8 @@
   </div>
   <div id="damage-vignette"></div>
 </div>
+
+<button id="mute-btn" type="button" title="Toggle sound (M)">♪ Sound</button>
 
 <div id="buy-menu" hidden>
   <h2>Buy phase</h2>
@@ -210,6 +244,7 @@
       <li><kbd>E</kbd> Plant / hold to plant</li>
       <li><kbd>Ctrl</kbd> Crouch</li>
       <li><kbd>Space</kbd> Jump</li>
+      <li><kbd>M</kbd> Mute</li>
       <li><kbd>1</kbd>–<kbd>4</kbd> Switch weapon</li>
     </ul>
   </section>

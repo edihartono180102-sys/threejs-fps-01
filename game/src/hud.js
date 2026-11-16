@@ -2,6 +2,9 @@
 // team pips, kill feed, bomb banner, buy menu and the overlay panels. It never touches
 // the simulation; the simulation pushes numbers in and reads callbacks out. Every
 // update is cached, so a value that did not change costs no DOM write.
+// New since the first build: the bomb banner carries a fuse progress bar, the topbar
+// carries a round-history strip (W/L per round), and a toast line announces match
+// events (a plant, a save round, a mute toggle) without touching the kill feed.
 const BUY_ITEMS = [
   { key: '1', id: 'rifle', name: 'VK-47 rifle', price: 2700, note: '34 dmg · auto' },
   { key: '2', id: 'smg', name: 'Hornet-9 SMG', price: 1500, note: '22 dmg · fast' },
@@ -25,10 +28,14 @@ export function createHud(callbacks) {
     money: $('money-value'),
     timer: $('timer-value'),
     round: $('round-value'),
+    history: $('round-history'),
     emberPips: $('ember-pips'),
     ashPips: $('ash-pips'),
     bomb: $('bomb-banner'),
+    bombText: $('bomb-text'),
+    bombProgress: $('bomb-progress'),
     feed: $('killfeed'),
+    toast: $('toast'),
     vignette: $('damage-vignette'),
     overlay: $('overlay'),
     overlayTitle: $('overlay-title'),
@@ -37,12 +44,15 @@ export function createHud(callbacks) {
     buy: $('buy-menu'),
     buyList: $('buy-list'),
     buyMoney: $('buy-money'),
+    mute: $('mute-btn'),
   };
   let hitTimer = 0;
+  let toastTimer = 0;
   let last = {};
   let feedCount = 0;
 
   function setText(node, key, value) {
+    if (!node) return;
     if (last[key] !== value) {
       last[key] = value;
       node.textContent = value;
@@ -61,6 +71,9 @@ export function createHud(callbacks) {
     }
   }
   buildBuy();
+  if (el.mute && callbacks.onMute) {
+    el.mute.addEventListener('click', () => callbacks.onMute());
+  }
 
   return {
     setHealth(health, armor) {
@@ -78,6 +91,8 @@ export function createHud(callbacks) {
       setText(el.ammoReserve, 'reserve', reserve === Infinity ? '/ ∞' : `/ ${reserve}`);
       setText(el.weapon, 'weapon', weaponName);
       el.ammo.classList.toggle('empty', mag === 0);
+      // Low magazine: pulse the ammo readout so a dry gun is not a surprise.
+      el.ammo.classList.toggle('low', mag > 0 && mag <= 4);
     },
     setMoney(money) {
       setText(el.money, 'money', `$${money}`);
@@ -92,15 +107,37 @@ export function createHud(callbacks) {
     setRound(ember, ash, round) {
       setText(el.round, 'round', `ROUND ${round} · EMBER ${ember} — ${ash} ASH`);
     },
+    // Round history: one dot per finished round, orange for an Ember win, blue
+    // for Ash. Cached on the joined string, so a repeated call costs nothing.
+    setHistory(results) {
+      if (!el.history) return;
+      const text = results.map((r) => (r === 'ember' ? '●' : '○')).join('');
+      if (last.history !== text) {
+        last.history = text;
+        el.history.textContent = text;
+        el.history.className = 'history';
+      }
+    },
     setPips(emberAlive, emberTotal, ashAlive, ashTotal) {
       const e = '●'.repeat(emberAlive) + '○'.repeat(Math.max(0, emberTotal - emberAlive));
       const a = '●'.repeat(ashAlive) + '○'.repeat(Math.max(0, ashTotal - ashAlive));
       setText(el.emberPips, 'emberPips', e);
       setText(el.ashPips, 'ashPips', a);
     },
-    setBomb(text) {
-      setText(el.bomb, 'bomb', text || '');
+    // text is the banner line; progress (0..1) fills the fuse bar when given.
+    // A null progress leaves the bar as it was; an empty text hides the banner.
+    // The text goes on #bomb-text, never on the banner itself: setting
+    // textContent on the banner would wipe its #bomb-progress child.
+    setBomb(text, progress = null) {
+      setText(el.bombText || el.bomb, 'bomb', text || '');
       el.bomb.hidden = !text;
+      if (progress !== null && el.bombProgress) {
+        const width = `${Math.max(0, Math.min(100, progress * 100))}%`;
+        if (last.bombWidth !== width) {
+          last.bombWidth = width;
+          el.bombProgress.style.width = width;
+        }
+      }
     },
     setCrosshair(spreadPx) {
       const gap = Math.round(4 + spreadPx * 900);
@@ -130,6 +167,15 @@ export function createHud(callbacks) {
       el.feed.prepend(row);
       while (el.feed.children.length > 5) el.feed.removeChild(el.feed.lastChild);
       setTimeout(() => row.remove(), 6000);
+    },
+    // One-line announcement under the topbar: a plant, a save, a mute toggle.
+    // Replaces the previous toast instead of stacking, and fades after 3 s.
+    toast(text) {
+      if (!el.toast) return;
+      el.toast.textContent = text;
+      el.toast.classList.add('on');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.toast.classList.remove('on'), 3000);
     },
     showOverlay(title, copy, action) {
       el.overlayTitle.textContent = title;

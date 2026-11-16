@@ -1,7 +1,10 @@
 // Weapons: four guns and one grenade. Each definition owns its numbers; the simulation
 // owns the ray and the damage. The view model is boxes on the camera, with a muzzle
 // flash plane and a flash light. Spread grows with movement speed and with sustained
-// fire, so stopping to aim pays.
+// fire, so stopping to aim pays — and crouching tightens it (spreadCrouch).
+// Damage falls off with distance: full damage inside falloffStart, sliding down to
+// falloffMin of the base past falloffEnd, so a shotgun is a close weapon and a rifle
+// still reaches across the yard. kick is the pitch the view model takes per shot.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 
@@ -11,32 +14,45 @@ export const WEAPONS = {
     mag: 12, reserve: Infinity, fireGap: 0.16, reloadTime: 1.3,
     damage: 26, headDamage: 78, auto: false, pellets: 1,
     spreadStill: 0.004, spreadMoving: 0.02, spreadBloom: 0.004, maxBloom: 0.02,
-    range: 60,
+    spreadCrouch: 0.6, kick: 0.008, range: 60,
+    falloffStart: 18, falloffEnd: 45, falloffMin: 0.6,
   },
   rifle: {
     id: 'rifle', name: 'VK-47', price: 2700, kind: 'rifle',
     mag: 30, reserve: 90, fireGap: 0.1, reloadTime: 1.9,
     damage: 34, headDamage: 100, auto: true, pellets: 1,
     spreadStill: 0.0022, spreadMoving: 0.028, spreadBloom: 0.0035, maxBloom: 0.03,
-    range: 90,
+    spreadCrouch: 0.55, kick: 0.011, range: 90,
+    falloffStart: 30, falloffEnd: 80, falloffMin: 0.7,
   },
   smg: {
     id: 'smg', name: 'Hornet-9', price: 1500, kind: 'smg',
     mag: 32, reserve: 96, fireGap: 0.08, reloadTime: 1.6,
     damage: 22, headDamage: 66, auto: true, pellets: 1,
     spreadStill: 0.004, spreadMoving: 0.03, spreadBloom: 0.003, maxBloom: 0.028,
-    range: 55,
+    spreadCrouch: 0.6, kick: 0.007, range: 55,
+    falloffStart: 14, falloffEnd: 40, falloffMin: 0.55,
   },
   shotgun: {
     id: 'shotgun', name: 'Breach-12', price: 1200, kind: 'shotgun',
     mag: 6, reserve: 24, fireGap: 0.85, reloadTime: 2.4,
     damage: 12, headDamage: 30, auto: false, pellets: 8,
     spreadStill: 0.02, spreadMoving: 0.035, spreadBloom: 0.01, maxBloom: 0.04,
-    range: 30,
+    spreadCrouch: 0.7, kick: 0.02, range: 30,
+    falloffStart: 6, falloffEnd: 22, falloffMin: 0.35,
   },
 };
 
 export const GRENADE = { name: 'Spark-9', price: 300, maxDamage: 90, radius: 6, fuse: 1.6 };
+
+// Damage multiplier at a distance: 1 inside falloffStart, then a straight line
+// down to falloffMin at falloffEnd, flat after that. Headshots scale the same way.
+export function falloff(def, distance) {
+  if (distance <= def.falloffStart) return 1;
+  if (distance >= def.falloffEnd) return def.falloffMin;
+  const t = (distance - def.falloffStart) / (def.falloffEnd - def.falloffStart);
+  return 1 + (def.falloffMin - 1) * t;
+}
 
 export function createWeaponView(camera) {
   const grip = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.wall), roughness: 0.7, metalness: 0.2 });
@@ -112,7 +128,7 @@ export function createWeaponView(camera) {
     pullTrigger() {
       state.cooldown = state.def.fireGap;
       state.flash = 0.06;
-      state.kick = 0.055;
+      state.kick = state.def.kick;
       state.bloom = Math.min(state.def.maxBloom, state.bloom + state.def.spreadBloom);
     },
     takeRound() {
@@ -126,9 +142,12 @@ export function createWeaponView(camera) {
       state.reloadLeft = state.def.reloadTime;
       return true;
     },
-    spread(speed) {
+    // Spread now takes the crouch state too: holding still and low is the
+    // steadiest shot in the game, which is what crouch is for.
+    spread(speed, crouching = false) {
       const moving = Math.min(1, speed / 5.2) * state.def.spreadMoving;
-      return state.def.spreadStill + moving + state.bloom;
+      const base = state.def.spreadStill + moving + state.bloom;
+      return crouching ? base * state.def.spreadCrouch : base;
     },
     refill() {
       state.mag = state.def.mag;

@@ -1,10 +1,13 @@
 // Every sound is synthesized with WebAudio: no audio files, no network, nothing to
 // license. The context is created lazily on the first user gesture (pointer lock), so
-// the page never needs an autoplay permission it does not have.
+// the page never needs an autoplay permission it does not have. All sounds go through
+// one master gain, so mute and volume are one switch each. Footsteps are quiet
+// filtered noise so a sprinting bot is audible before it is visible.
 export function createAudio() {
   let context = null;
   let master = null;
   let muted = false;
+  let volume = 0.5;
   let noiseBuffer = null;
 
   function ensure() {
@@ -16,7 +19,7 @@ export function createAudio() {
     if (!AudioContext) return null;
     context = new AudioContext();
     master = context.createGain();
-    master.gain.value = 0.5;
+    master.gain.value = muted ? 0 : volume;
     master.connect(context.destination);
     const length = context.sampleRate;
     noiseBuffer = context.createBuffer(1, length, context.sampleRate);
@@ -71,7 +74,16 @@ export function createAudio() {
     },
     toggleMute() {
       muted = !muted;
+      if (master) master.gain.value = muted ? 0 : volume;
       return muted;
+    },
+    isMuted() {
+      return muted;
+    },
+    setVolume(value) {
+      volume = Math.max(0, Math.min(1, value));
+      if (master) master.gain.value = muted ? 0 : volume;
+      return volume;
     },
     shot(kind) {
       const t = now();
@@ -138,6 +150,21 @@ export function createAudio() {
     },
     hurt() {
       tone(now(), 0.12, 'sawtooth', 180, 70, 0.16);
+    },
+    // A soft step: lowpass noise, quiet enough to be a cue rather than a sound
+    // effect. gain scales with distance; the sim calls it on hard landings too.
+    footstep(gainValue = 0.1) {
+      burst(now(), 0.06, 'lowpass', 500, Math.max(0.02, Math.min(0.3, gainValue)));
+    },
+    // UI click for the buy menu and buttons: one short tick, no fanfare.
+    click() {
+      tone(now(), 0.03, 'square', 900, 900, 0.08);
+    },
+    // Round start: a two-note rise, quieter than the round-end stings.
+    roundStart() {
+      const t = now();
+      tone(t, 0.1, 'triangle', 440, 440, 0.12);
+      tone(t + 0.1, 0.14, 'triangle', 660, 660, 0.12);
     },
     roundWin() {
       const t = now();

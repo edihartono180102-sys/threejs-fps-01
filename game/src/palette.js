@@ -1,6 +1,7 @@
 // The look plan, in one place: dusk over an industrial yard. Six scene colours plus the
 // two team colours; the lighting makes every shade the game needs, so no other colour
 // appears in the code. The same names are the CSS custom properties in index.html.
+// Helpers here let code derive tints from the plan instead of inventing new hexes.
 export const PALETTE = {
   canvas: '#191d29', // sky / fog
   ground: '#2b2622', // yard floor
@@ -17,4 +18,26 @@ export const PALETTE = {
 
 export function shade(name) {
   return PALETTE[name];
+}
+
+export function teamColor(team) {
+  return team === 'ember' ? PALETTE.accent : PALETTE.ash;
+}
+
+// '#rrggbb' -> [r, g, b] in 0..1, for lights and materials that need numbers.
+export function hexRgb(hex) {
+  const value = Number.parseInt(hex.slice(1), 16);
+  return [((value >> 16) & 0xff) / 255, ((value >> 8) & 0xff) / 255, (value & 0xff) / 255];
+}
+
+// Mix two palette hexes: t = 0 returns a, t = 1 returns b. Used for tints such as
+// the damage flash (ink -> danger) without adding new literal colours.
+export function mixHex(a, b, t) {
+  const [ar, ag, ab] = hexRgb(a);
+  const [br, bg, bb] = hexRgb(b);
+  const clamp = (v) => Math.max(0, Math.min(255, Math.round(v * 255)));
+  const r = clamp(ar + (br - ar) * t);
+  const g = clamp(ag + (bg - ag) * t);
+  const bl = clamp(ab + (bb - ab) * t);
+  return `#${((r << 16) | (g << 8) | bl).toString(16).padStart(6, '0')}`;
 }
